@@ -112,9 +112,9 @@ class ShardedClient implements ClientInterface
      * @inheritDoc
      * @throws \Flexihash\Exception
      */
-    public function putIf(string $key, $value, $previousValue, bool $returnNewValueOnFail = false)
+    public function putIf(string $key, $value, $previousValue, int $lease = 0, bool $returnNewValueOnFail = false)
     {
-        return $this->getClientFromKey($key)->putIf($key, $value, $previousValue, $returnNewValueOnFail);
+        return $this->getClientFromKey($key)->putIf($key, $value, $previousValue, $lease, $returnNewValueOnFail);
     }
 
     /**

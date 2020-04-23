@@ -55,11 +55,12 @@ interface ClientInterface
      * @param string $key
      * @param mixed $value The new value to set
      * @param mixed $previousValue The previous value to compare against
+     * @param int $lease
      * @param bool $returnNewValueOnFail
      * @return bool|string
      * @throws InvalidResponseStatusCodeException
      */
-    public function putIf(string $key, $value, $previousValue, bool $returnNewValueOnFail = false);
+    public function putIf(string $key, $value, $previousValue, int $lease = 0, bool $returnNewValueOnFail = false);
 
     /**
      * Delete if $key value matches $previous value otherwise $returnNewValueOnFail

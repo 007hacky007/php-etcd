@@ -58,11 +58,12 @@ interface ClientInterface
      * @param string $compareValue The previous value to compare against
      * @param string $compareOp can be '=', '!=', '>', '<'
      * @param int $compareTarget check constants in the CompareTarget class for available values
+     * @param int $lease
      * @param bool $returnNewValueOnFail
      * @return bool|string
      * @throws InvalidResponseStatusCodeException
      */
-    public function putIf(string $key, string $value, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, bool $returnNewValueOnFail = false);
+    public function putIf(string $key, string $value, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, int $lease = 0, bool $returnNewValueOnFail = false);
 
     /**
      * Delete if $key value matches $previous value otherwise $returnNewValueOnFail

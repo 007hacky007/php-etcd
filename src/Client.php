@@ -175,14 +175,16 @@ class Client implements ClientInterface
      * @param mixed $value The new value to set
      * @param mixed $previousValue The previous value to compare against
      * @param bool $returnNewValueOnFail
+     * @param int $lease
      * @return bool|string
      * @throws InvalidResponseStatusCodeException
      */
-    public function putIf(string $key, $value, $previousValue, bool $returnNewValueOnFail = false)
+    public function putIf(string $key, $value, $previousValue, bool $returnNewValueOnFail = false, int $lease = 0)
     {
         $request = new PutRequest();
         $request->setKey($key);
         $request->setValue($value);
+        $request->setLease($lease);
 
         $operation = new RequestOp();
         $operation->setRequestPut($request);

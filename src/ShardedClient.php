@@ -3,7 +3,10 @@
 namespace Aternos\Etcd;
 
 use Aternos\Etcd\Exception\InvalidClientException;
-use Etcdserverpb\Compare\CompareTarget;
+use Etcdserverpb\Compare;
+use Etcdserverpb\RequestOp;
+use Etcdserverpb\TxnResponse;
+use Flexihash\Exception;
 use Flexihash\Flexihash;
 
 /**
@@ -50,7 +53,7 @@ class ShardedClient implements ClientInterface
      *
      * @param string $key
      * @return ClientInterface
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
     protected function getClientFromKey(string $key): ClientInterface
     {
@@ -71,8 +74,19 @@ class ShardedClient implements ClientInterface
     }
 
     /**
+     * Get random client
+     *
+     * @return ClientInterface
+     */
+    protected function getRandomClient(): ClientInterface
+    {
+        $rndIndex = array_rand($this->clients);
+        return $this->clients[$rndIndex];
+    }
+
+    /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
     public function getHostname(?string $key = null): string
     {
@@ -84,7 +98,7 @@ class ShardedClient implements ClientInterface
 
     /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
     public function put(string $key, $value, bool $prevKv = false, int $lease = 0, bool $ignoreLease = false, bool $ignoreValue = false)
     {
@@ -93,7 +107,7 @@ class ShardedClient implements ClientInterface
 
     /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
     public function get(string $key)
     {
@@ -102,7 +116,7 @@ class ShardedClient implements ClientInterface
 
     /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
     public function delete(string $key)
     {
@@ -111,19 +125,88 @@ class ShardedClient implements ClientInterface
 
     /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
-    public function putIf(string $key, string $value, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, int $lease = 0, bool $returnNewValueOnFail = false)
+    public function putIf(string $key, string $value, $compareValue, bool $returnNewValueOnFail = false)
     {
-        return $this->getClientFromKey($key)->putIf($key, $value, $compareValue, $compareOp, $compareTarget, $lease, $returnNewValueOnFail);
+        return $this->getClientFromKey($key)->putIf($key, $value, $compareValue, $returnNewValueOnFail);
     }
 
     /**
      * @inheritDoc
-     * @throws \Flexihash\Exception
+     * @throws Exception
      */
-    public function deleteIf(string $key, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, bool $returnNewValueOnFail = false)
+    public function deleteIf(string $key, $compareValue, bool $returnNewValueOnFail = false)
     {
-        return $this->getClientFromKey($key)->deleteIf($key, $compareValue, $compareOp, $compareTarget, $returnNewValueOnFail);
+        return $this->getClientFromKey($key)->deleteIf($key, $compareValue, $returnNewValueOnFail);
+    }
+
+    /**
+     * @inheritDoc
+     * @throws Exception
+     */
+    public function txnRequest(string $key, array $requestOperations, ?array $failureOperations, array $compare): TxnResponse
+    {
+        return $this->getClientFromKey($key)->txnRequest($key, $requestOperations, $failureOperations, $compare);
+    }
+
+    /**
+     * @inheritDoc
+     * @throws Exception
+     */
+    public function getCompare(string $key, string $value, int $result, int $target): Compare
+    {
+        return $this->getClientFromKey($key)->getCompare($key, $value, $result, $target);
+    }
+
+    /**
+     * @inheritDoc
+     * @throws Exception
+     */
+    public function getGetOperation(string $key): RequestOp
+    {
+        return $this->getClientFromKey($key)->getGetOperation($key);
+    }
+
+    /**
+     * @inheritDoc
+     * @throws Exception
+     */
+    public function getPutOperation(string $key, string $value, int $leaseId = 0): RequestOp
+    {
+        return $this->getClientFromKey($key)->getPutOperation($key, $value, $leaseId);
+    }
+
+    /**
+     * @inheritDoc
+     * @throws Exception
+     */
+    public function getDeleteOperation(string $key): RequestOp
+    {
+        return $this->getClientFromKey($key)->getDeleteOperation($key);
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function getLeaseID(int $ttl)
+    {
+        return $this->getRandomClient()->getLeaseID($ttl);
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function revokeLeaseID(int $leaseID)
+    {
+        return $this->getRandomClient()->revokeLeaseID($leaseID);
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function refreshLease(int $leaseID)
+    {
+        return $this->getRandomClient()->refreshLease($leaseID);
     }
 }

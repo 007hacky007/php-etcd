@@ -13,6 +13,12 @@ use Etcdserverpb\Compare\CompareTarget;
 use Etcdserverpb\DeleteRangeRequest;
 use Etcdserverpb\DeleteRangeResponse;
 use Etcdserverpb\KVClient;
+use Etcdserverpb\LeaseClient;
+use Etcdserverpb\LeaseGrantRequest;
+use Etcdserverpb\LeaseGrantResponse;
+use Etcdserverpb\LeaseKeepAliveRequest;
+use Etcdserverpb\LeaseKeepAliveResponse;
+use Etcdserverpb\LeaseRevokeRequest;
 use Etcdserverpb\PutRequest;
 use Etcdserverpb\PutResponse;
 use Etcdserverpb\RangeRequest;
@@ -21,6 +27,7 @@ use Etcdserverpb\RequestOp;
 use Etcdserverpb\ResponseOp;
 use Etcdserverpb\TxnRequest;
 use Etcdserverpb\TxnResponse;
+use Exception;
 use Grpc\ChannelCredentials;
 
 /**
@@ -44,6 +51,11 @@ class Client implements ClientInterface
     protected $password;
 
     /**
+     * @var int
+     */
+    protected $timeout;
+
+    /**
      * @var string
      */
     protected $token;
@@ -59,17 +71,24 @@ class Client implements ClientInterface
     protected $authClient;
 
     /**
+     * @var LeaseClient
+     */
+    protected $leaseClient;
+
+    /**
      * Client constructor.
      *
      * @param string $hostname
      * @param bool $username
      * @param bool $password
+     * @param int $timeout in microseconds, default 1 second
      */
-    public function __construct($hostname = "localhost:2379", $username = false, $password = false)
+    public function __construct($hostname = "localhost:2379", $username = false, $password = false, $timeout = 1000000)
     {
         $this->hostname = $hostname;
         $this->username = $username;
         $this->password = $password;
+        $this->timeout = $timeout;
     }
 
     /**
@@ -87,14 +106,14 @@ class Client implements ClientInterface
      * @param string $key
      * @param mixed $value
      * @param bool $prevKv Get the previous key value in the response
-     * @param int $lease
+     * @param int $leaseID
      * @param bool $ignoreLease Ignore the current lease
      * @param bool $ignoreValue Updates the key using its current value
      *
      * @return string|null Returns previous value if $prevKv is set to true
      * @throws InvalidResponseStatusCodeException
      */
-    public function put(string $key, $value, bool $prevKv = false, int $lease = 0, bool $ignoreLease = false, bool $ignoreValue = false)
+    public function put(string $key, $value, bool $prevKv = false, int $leaseID = 0, bool $ignoreLease = false, bool $ignoreValue = false)
     {
         $client = $this->getKvClient();
 
@@ -105,10 +124,10 @@ class Client implements ClientInterface
         $request->setPrevKv($prevKv);
         $request->setIgnoreLease($ignoreLease);
         $request->setIgnoreValue($ignoreValue);
-        $request->setLease($lease);
+        $request->setLease($leaseID);
 
         /** @var PutResponse $response */
-        list($response, $status) = $client->Put($request, $this->getMetaData())->wait();
+        list($response, $status) = $client->Put($request, $this->getMetaData(), $this->getOptions())->wait();
         $this->validateStatus($status);
 
         if ($prevKv) {
@@ -131,7 +150,7 @@ class Client implements ClientInterface
         $request->setKey($key);
 
         /** @var RangeResponse $response */
-        list($response, $status) = $client->Range($request, $this->getMetaData())->wait();
+        list($response, $status) = $client->Range($request, $this->getMetaData(), $this->getOptions())->wait();
         $this->validateStatus($status);
 
         $field = $response->getKvs();
@@ -158,7 +177,7 @@ class Client implements ClientInterface
         $request->setKey($key);
 
         /** @var DeleteRangeResponse $response */
-        list($response, $status) = $client->DeleteRange($request, $this->getMetaData())->wait();
+        list($response, $status) = $client->DeleteRange($request, $this->getMetaData(), $this->getOptions())->wait();
         $this->validateStatus($status);
 
         if ($response->getDeleted() > 0) {
@@ -173,43 +192,177 @@ class Client implements ClientInterface
      *
      * @param string $key
      * @param string $value The new value to set
-     * @param string $compareValue The previous value to compare against
-     * @param string $compareOp can be '=', '!=', '>', '<'
-     * @param int $compareTarget check constants in the CompareTarget class for available values
-     * @param int $lease
+     * @param bool|string $compareValue The previous value to compare against
      * @param bool $returnNewValueOnFail
      * @return bool|string
      * @throws InvalidResponseStatusCodeException
      * @throws \Exception
      */
-    public function putIf(string $key, string $value, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, int $lease = 0, bool $returnNewValueOnFail = false)
+    public function putIf(string $key, string $value, $compareValue, bool $returnNewValueOnFail = false)
     {
-        $request = new PutRequest();
-        $request->setKey($key);
-        $request->setValue($value);
-        $request->setLease($lease);
+        $operation = $this->getPutOperation($key, $value);
+        $compare = $this->getCompareForIf($key, $compareValue);
+        $failOperation = $this->getFailOperation($key, $returnNewValueOnFail);
 
-        $operation = new RequestOp();
-        $operation->setRequestPut($request);
-
-        $compare = $this->getCompare($key, $compareValue, $compareOp, $compareTarget);
-
-        return $this->requestIf($key, $operation, $compare, $returnNewValueOnFail);
+        $response = $this->txnRequest($key, [$operation], $failOperation, [$compare]);
+        return $this->getIfResponse($returnNewValueOnFail, $response);
     }
 
     /**
      * Delete if $key value matches $previous value otherwise $returnNewValueOnFail
      *
      * @param string $key
-     * @param string $compareValue The previous value to compare against
-     * @param string $compareOp can be '=', '!=', '>', '<'
-     * @param int $compareTarget check constants in the CompareTarget class for available values
+     * @param bool|string $compareValue The previous value to compare against
      * @param bool $returnNewValueOnFail
      * @return bool|string
      * @throws InvalidResponseStatusCodeException
      * @throws \Exception
      */
-    public function deleteIf(string $key, string $compareValue = '0', string $compareOp = '=', int $compareTarget = CompareTarget::VALUE, bool $returnNewValueOnFail = false)
+    public function deleteIf(string $key, $compareValue, bool $returnNewValueOnFail = false)
+    {
+        $operation = $this->getDeleteOperation($key);
+        $compare = $this->getCompareForIf($key, $compareValue);
+        $failOperation = $this->getFailOperation($key, $returnNewValueOnFail);
+
+        $response = $this->txnRequest($key, [$operation], $failOperation, [$compare]);
+        return $this->getIfResponse($returnNewValueOnFail, $response);
+    }
+
+    /**
+     * Get leaseID which can be used with etcd's put
+     *
+     * @param int $ttl time-to-live in seconds
+     * @return int
+     * @throws InvalidResponseStatusCodeException
+     */
+    public function getLeaseID(int $ttl)
+    {
+        $lease = $this->getLeaseClient();
+        $leaseRequest = new LeaseGrantRequest();
+        $leaseRequest->setTTL($ttl);
+
+        /** @var LeaseGrantResponse $response */
+        list($response, $status) = $lease->LeaseGrant($leaseRequest, $this->getMetaData())->wait();
+        $this->validateStatus($status);
+
+        return (int)$response->getID();
+    }
+
+    /**
+     * Revoke existing leaseID
+     *
+     * @param int $leaseID
+     * @throws InvalidResponseStatusCodeException
+     */
+    public function revokeLeaseID(int $leaseID)
+    {
+        $lease = $this->getLeaseClient();
+        $leaseRequest = new LeaseRevokeRequest();
+        $leaseRequest->setID($leaseID);
+
+        list(, $status) = $lease->LeaseRevoke($leaseRequest, $this->getMetaData())->wait();
+        $this->validateStatus($status);
+    }
+
+    /**
+     * Refresh chosen leaseID
+     *
+     * @param int $leaseID
+     * @return int lease TTL
+     * @throws InvalidResponseStatusCodeException
+     * @throws Exception
+     */
+    public function refreshLease(int $leaseID)
+    {
+        $lease = $this->getLeaseClient();
+        $leaseBidi = $lease->LeaseKeepAlive($this->getMetaData());
+        $leaseKeepAlive = new LeaseKeepAliveRequest();
+        $leaseKeepAlive->setID($leaseID);
+        /** @noinspection PhpParamsInspection */
+        $leaseBidi->write($leaseKeepAlive);
+        $leaseBidi->writesDone();
+        /** @var LeaseKeepAliveResponse $response */
+        $response = $leaseBidi->read();
+        $leaseBidi->cancel();
+        if(empty($response->getID()) || (int)$response->getID() !== $leaseID)
+            throw new Exception('Could not refresh lease ID: ' . $leaseID);
+
+        return (int)$response->getTTL();
+    }
+
+    /**
+     * Execute $requestOperation if $key value matches $previous otherwise $returnNewValueOnFail
+     *
+     * @param string $key
+     * @param array $requestOperations operations to perform on success, array of RequestOp objects
+     * @param array|null $failureOperations operations to perform on failure, array of RequestOp objects
+     * @param array $compare array of Compare objects
+     * @return TxnResponse
+     * @throws InvalidResponseStatusCodeException
+     */
+    public function txnRequest(string $key, array $requestOperations, ?array $failureOperations, array $compare): TxnResponse
+    {
+        $client = $this->getKvClient();
+
+        $request = new TxnRequest();
+        $request->setCompare($compare);
+        $request->setSuccess($requestOperations);
+        if($failureOperations !== null)
+            $request->setFailure($failureOperations);
+
+        /** @var TxnResponse $response */
+        list($response, $status) = $client->Txn($request, $this->getMetaData(), $this->getOptions())->wait();
+        $this->validateStatus($status);
+
+        return $response;
+    }
+
+    /**
+     * Creates RequestOp of Get operation for requestIf method
+     *
+     * @param string $key
+     * @return RequestOp
+     */
+    public function getGetOperation(string $key): RequestOp
+    {
+        $request = new RangeRequest();
+        $request->setKey($key);
+
+        $operation = new RequestOp();
+        $operation->setRequestRange($request);
+
+        return $operation;
+    }
+
+    /**
+     * Creates RequestOp of Put operation for requestIf method
+     *
+     * @param string $key
+     * @param string $value
+     * @param int $leaseId
+     * @return RequestOp
+     */
+    public function getPutOperation(string $key, string $value, int $leaseId = 0): RequestOp
+    {
+        $request = new PutRequest();
+        $request->setKey($key);
+        $request->setValue($value);
+        if($leaseId !== 0)
+            $request->setLease($leaseId);
+
+        $operation = new RequestOp();
+        $operation->setRequestPut($request);
+
+        return $operation;
+    }
+
+    /**
+     * Creates RequestOp of Delete operation for requestIf method
+     *
+     * @param string $key
+     * @return RequestOp
+     */
+    public function getDeleteOperation(string $key): RequestOp
     {
         $request = new DeleteRangeRequest();
         $request->setKey($key);
@@ -217,58 +370,43 @@ class Client implements ClientInterface
         $operation = new RequestOp();
         $operation->setRequestDeleteRange($request);
 
-        $compare = $this->getCompare($key, $compareValue, $compareOp, $compareTarget);
-
-        return $this->requestIf($key, $operation, $compare, $returnNewValueOnFail);
+        return $operation;
     }
 
     /**
-     * Execute $requestOperation if $key value matches $previous otherwise $returnNewValueOnFail
+     * Get an instance of Compare
      *
      * @param string $key
-     * @param RequestOp $requestOperatio
-     * @param Compare $compare
-     * @param bool $returnNewValueOnFail
-     * @return bool|string
-     * @throws InvalidResponseStatusCodeException
+     * @param string $value
+     * @param int $result see CompareResult class for available constants
+     * @param int $target check constants in the CompareTarget class for available values
+     * @return Compare
      */
-    protected function requestIf(string $key, RequestOp $requestOperation, Compare $compare, bool $returnNewValueOnFail = false)
+    public function getCompare(string $key, string $value, int $result, int $target): Compare
     {
-        $client = $this->getKvClient();
+        $compare = new Compare();
+        $compare->setKey($key);
+        $compare->setValue($value);
+        $compare->setTarget($target);
+        $compare->setResult($result);
 
-        $request = new TxnRequest();
-        $request->setCompare([$compare]);
-        $request->setSuccess([$requestOperation]);
+        return $compare;
+    }
 
-        if ($returnNewValueOnFail) {
-            $getRequest = new RangeRequest();
-            $getRequest->setKey($key);
-
-            $getOperation = new RequestOp();
-            $getOperation->setRequestRange($getRequest);
-            $request->setFailure([$getOperation]);
+    /**
+     * Get an instance of LeaseClient
+     *
+     * @return LeaseClient
+     */
+    protected function getLeaseClient(): LeaseClient
+    {
+        if (!$this->leaseClient) {
+            $this->leaseClient = new LeaseClient($this->hostname, [
+                'credentials' => ChannelCredentials::createInsecure()
+            ]);
         }
 
-        /** @var TxnResponse $response */
-        list($response, $status) = $client->Txn($request, $this->getMetaData())->wait();
-        $this->validateStatus($status);
-
-        if ($returnNewValueOnFail && !$response->getSucceeded()) {
-            /** @var ResponseOp $responseOp */
-            $responseOp = $response->getResponses()[0];
-
-            $getResponse = $responseOp->getResponseRange();
-
-            $field = $getResponse->getKvs();
-
-            if (count($field) === 0) {
-                return false;
-            }
-
-            return $field[0]->getValue();
-        } else {
-            return $response->getSucceeded();
-        }
+        return $this->leaseClient;
     }
 
     /**
@@ -303,43 +441,6 @@ class Client implements ClientInterface
         return $this->authClient;
     }
 
-    /**
-     * Get an instance of Compare
-     *
-     * @param string $key
-     * @param string $value
-     * @param string $result resultOp, can be '=', '!=', '>', '<'
-     * @param int $target check constants in the CompareTarget class for available values
-     * @return Compare
-     * @throws \Exception
-     */
-    protected function getCompare(string $key, string $value, string $result, int $target): Compare
-    {
-        switch ($result) {
-            case '=':
-                $cmpResult = CompareResult::EQUAL;
-                break;
-            case '!=':
-                $cmpResult = CompareResult::NOT_EQUAL;
-                break;
-            case '>':
-                $cmpResult = CompareResult::GREATER;
-                break;
-            case '<':
-                $cmpResult = CompareResult::LESS;
-                break;
-            default:
-                throw new \Exception('Unknown result op');
-        }
-
-        $compare = new Compare();
-        $compare->setKey($key);
-        $compare->setValue($value);
-        $compare->setTarget($target);
-        $compare->setResult($cmpResult);
-
-        return $compare;
-    }
 
     /**
      * Get an authentication token
@@ -357,7 +458,7 @@ class Client implements ClientInterface
             $request->setPassword($this->password);
 
             /** @var AuthenticateResponse $response */
-            list($response, $status) = $client->Authenticate($request)->wait();
+            list($response, $status) = $client->Authenticate($request, [], $this->getOptions())->wait();
             $this->validateStatus($status);
 
             $this->token = $response->getToken();
@@ -383,6 +484,17 @@ class Client implements ClientInterface
     }
 
     /**
+     * Add timeout
+     *
+     * @param array $options
+     * @return array
+     */
+    protected function getOptions($options = []): array
+    {
+        return array_merge(["timeout" => $this->timeout], $options);
+    }
+
+    /**
      * @param $status
      * @throws InvalidResponseStatusCodeException
      */
@@ -391,5 +503,59 @@ class Client implements ClientInterface
         if ($status->code !== 0) {
             throw ResponseStatusCodeExceptionFactory::getExceptionByCode($status->code, $status->details);
         }
+    }
+
+    /**
+     * @param string $key
+     * @param string $compareValue
+     * @return Compare
+     */
+    protected function getCompareForIf(string $key, string $compareValue): Compare
+    {
+        if ($compareValue === false) {
+            $compare = $this->getCompare($key, '0', CompareResult::EQUAL, CompareTarget::VERSION);
+        } else {
+            $compare = $this->getCompare($key, $compareValue, CompareResult::EQUAL, CompareTarget::VALUE);
+        }
+        return $compare;
+    }
+
+    /**
+     * @param bool $returnNewValueOnFail
+     * @param TxnResponse $response
+     * @return bool
+     */
+    protected function getIfResponse(bool $returnNewValueOnFail, TxnResponse $response): bool
+    {
+        if ($returnNewValueOnFail && !$response->getSucceeded()) {
+            /** @var ResponseOp $responseOp */
+            $responseOp = $response->getResponses()[0];
+
+            $getResponse = $responseOp->getResponseRange();
+
+            $field = $getResponse->getKvs();
+
+            if (count($field) === 0) {
+                return false;
+            }
+
+            return $field[0]->getValue();
+        } else {
+            return $response->getSucceeded();
+        }
+    }
+
+    /**
+     * @param string $key
+     * @param bool $returnNewValueOnFail
+     * @return array|null
+     */
+    protected function getFailOperation(string $key, bool $returnNewValueOnFail)
+    {
+        $failOperation = null;
+        if ($returnNewValueOnFail)
+            $failOperation = [$this->getGetOperation($key)];
+
+        return $failOperation;
     }
 }
